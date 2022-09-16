@@ -2,6 +2,7 @@ from unittest import result
 from matplotlib import transforms
 from dataset import CELEBA_Customized
 
+
 from torch.utils.data import DataLoader
 import torchvision.transforms as transforms
 import torchvision
@@ -14,14 +15,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pickle
 from PIL import Image
+import timeit
 
-
-# plot the image
 def imshow(img):
     img = img / 2 + 0.5     # unnormalize
     npimg = img.numpy() # convert from tensor
     plt.imshow(np.transpose(npimg, (1, 2, 0)))
     plt.show()
+
 
 def get_part_of_dataset(trainloader):
     dataset = []
@@ -30,14 +31,14 @@ def get_part_of_dataset(trainloader):
     for i, (input, label) in enumerate(trainloader):
         dataset.append(input)
         labels.append(label)
-        if i == 9 :
+        if i == 300 :
             break
 
     return dataset, labels
 
 def label_window(number_of_classes, label, row_start, row_end, col_start, col_end):
     temp = [0]*number_of_classes
-    neighbourhood = 5
+    neighbourhood = 0
     if (col_end > label[1] - neighbourhood) and (col_start < label[1] + neighbourhood) and (row_end > label[0] - neighbourhood) and (row_start < label[0] + neighbourhood):
         temp[0] = 1
     elif (col_end > label[3] - neighbourhood) and (col_start < label[3] + neighbourhood) and (row_end > label[2] - neighbourhood) and (row_start < label[2] + neighbourhood):
@@ -54,7 +55,7 @@ def label_window(number_of_classes, label, row_start, row_end, col_start, col_en
     return temp
 
 def make_window(channel, dataset_channel, class_label_matrix, img, label, size, step, number_of_dimensions, number_of_classes):
-    windows = img.unfold(1, size, step).unfold(2, size, step).unfold(3, size, step) # unflod(dimension, size, step)
+    windows = img.unfold(1, size, step).unfold(2, size, step).unfold(3, size, step)
         
     for i in range(windows.shape[2]):
         row_start, row_end = i*step, i*step + size
@@ -64,11 +65,9 @@ def make_window(channel, dataset_channel, class_label_matrix, img, label, size, 
             dataset_channel.append(windows[0,0,i,j,channel].reshape(number_of_dimensions))      
             class_label_matrix.append(label_window(number_of_classes, label[0], row_start, row_end, col_start, col_end))
 
-
 def make_dataset(channel, dataset_channel, class_label_matrix, dataset, labels, size, step, number_of_dimensions, number_of_classes):
     for i in range(len(dataset)):
         make_window(channel, dataset_channel, class_label_matrix, dataset[i], labels[i], size, step, number_of_dimensions, number_of_classes)
-
 
 def initialize_centroids(dataset, centroids, inverted_covariances, covariances, gamma, sigma, threshold, number_of_dimensions):
     number_of_centroids = 0
@@ -170,46 +169,52 @@ def update_covariances(dataset_channel, class_label_matrix, centroids, covarianc
 
         inverted_covariances[i] = calculate_inverted_covariance(covariances[i])
 
+def initialize_centroids_channel(dataset, gamma, sigma, threshold, number_of_dimensions):
+    centroids = []
+    covariances = []
+    inverted_covariances = []
 
-def suppervised_fuzzy_clustering(dataset, labels, iteration, number_of_dimensions, number_of_classes, size, step, gamma, sigma, threshold, beta):
+    for color_channel in range(3):
+        initialize_centroids(dataset[color_channel], centroids, inverted_covariances, covariances, gamma, sigma, threshold, number_of_dimensions)
+        print(len(centroids))
+    
+    return centroids, covariances, inverted_covariances
+
+def supervised_fuzzy_clustering(dataset, labels, p_centroids, cov, icm, iteration, number_of_dimensions, number_of_classes, size, step, gamma, sigma, threshold, beta):
     centroids_channel = []
+    cov_channel = []
     icm_channel = []
-    entropy_channel = []
+    
+  
     for color_channel in range(3):
         print(f'color channel {color_channel} started.')
+        
         dataset_channel = []
         class_label_matrix = []
 
         # centroid and cov of each cluster
-        centroids = []
-        covariances = []
-        inverted_covariances = []
+        centroids = p_centroids[color_channel]
+        covariances = cov[color_channel] # just in order to have a square matrix
+        inverted_covariances = icm[color_channel]
 
         make_dataset(color_channel, dataset_channel, class_label_matrix, dataset, labels, size, step, number_of_dimensions, number_of_classes)
         dataset_channel = torch.stack(dataset_channel)
         dataset_channel = dataset_channel.type(torch.DoubleTensor)
         class_label_matrix = torch.tensor(class_label_matrix, dtype=torch.float64)
 
-        initialize_centroids(dataset_channel, centroids, inverted_covariances, covariances, gamma, sigma, threshold, number_of_dimensions)
-        print(len(centroids))
         q = torch.zeros((len(centroids), number_of_classes), dtype=torch.float64) # matrix that contains the probibilities number of clusters x number of classes
 
-        entropy_curve = []
         for j in range(iteration):
-            centroids = update_centroids(dataset_channel, class_label_matrix, centroids, inverted_covariances, q, gamma, beta, number_of_dimensions)
-            update_covariances(dataset_channel, class_label_matrix, centroids, covariances, inverted_covariances, q, classes, gamma, beta, number_of_dimensions)
-        
-        # entropy = calculate_entropy(centroids_channel, icm_channel, gamma, dataset, labels, step, size, number_of_dimensions, number_of_classes)
-        # entropy_curve.append(entropy)
-        # print(f'{i}th Entropy = {entropy}')
+            centroids = update_centroids(dataset[color_channel], class_label_matrix, centroids, inverted_covariances, q, gamma, beta, number_of_dimensions)
+            update_covariances(dataset[color_channel], class_label_matrix, centroids, covariances, inverted_covariances, q, classes, gamma, beta, number_of_dimensions)
         
         centroids_channel.append(centroids)
+        cov_channel.append(covariances)
         icm_channel.append(inverted_covariances)
-        entropy_channel.append(entropy_curve)
 
         print(f'color channel {color_channel} finished.')
 
-    return centroids_channel, icm_channel
+    return centroids_channel, cov_channel, icm_channel
 
 # apply filter --------------------------------------------------------------------------------------
 def calculate_mahanalobis_distance(icm, m, x, number_of_dimensions):
@@ -221,16 +226,15 @@ def calculate_membership(icm, vi, x, gamma, number_of_dimensions):
     distance = calculate_mahanalobis_distance(icm, vi, x, number_of_dimensions)
     return torch.exp(-1*gamma*distance)
 
-def surround_pixel(img, size, step):
+def surround_pixel(img, size, step, number_of_dimensions):
     img= img[0]
-    windows = []
-    windows.append(img[0].unfold(0, size, step).unfold(1, size, step)) # unflod(dimension, size, step)
-    windows.append(img[1].unfold(0, size, step).unfold(1, size, step)) # unflod(dimension, size, step)
-    windows.append(img[2].unfold(0, size, step).unfold(1, size, step)) # unflod(dimension, size, step)
+
+    windows = img.unfold(1, size, step).unfold(2, size, step)
+
     return windows
 
 def apply_filter(icm_channel, centroids_channel, cluster_no, gamma, number_of_dimensions, img, size, step):
-    windows = surround_pixel(img, size, step)
+    windows = surround_pixel(img, size, step, number_of_dimensions)
     len_c = [len(centroids_channel[0]), len(centroids_channel[1]), len(centroids_channel[2])]
 
     result_r = torch.zeros((windows[0].shape[0], windows[0].shape[1]))
@@ -240,13 +244,17 @@ def apply_filter(icm_channel, centroids_channel, cluster_no, gamma, number_of_di
     for i in range(windows[0].shape[0]):
         for j in range(windows[0].shape[1]):
             if len_c[0] > cluster_no:
-                result_r[i][j] = calculate_membership(icm_channel[0][cluster_no], centroids_channel[0][cluster_no], windows[0][i, j], gamma, number_of_dimensions)
+                result_r[i][j] = calculate_membership(icm_channel[0][cluster_no], centroids_channel[0][cluster_no], windows[0, i, j], gamma, number_of_dimensions)
             if len_c[1] > cluster_no:
-                result_g[i][j] = calculate_membership(icm_channel[1][cluster_no], centroids_channel[1][cluster_no], windows[1][i, j], gamma, number_of_dimensions)
+                result_g[i][j] = calculate_membership(icm_channel[1][cluster_no], centroids_channel[1][cluster_no], windows[1, i, j], gamma, number_of_dimensions)
             if len_c[2] > cluster_no:
-                result_b[i][j] = calculate_membership(icm_channel[2][cluster_no], centroids_channel[2][cluster_no], windows[2][i, j], gamma, number_of_dimensions)
+                result_b[i][j] = calculate_membership(icm_channel[2][cluster_no], centroids_channel[2][cluster_no], windows[2, i, j], gamma, number_of_dimensions)
     
-    result = [result_r, result_g, result_b]
+    result = [result_r , result_g , result_b]
+    # for i in range(windows[0].shape[0]):
+    #     for j in range(windows[0].shape[1]):
+    #         if result[i][j] > 1:
+    #             result[i][j] = 1
     result = torch.stack(result)
     return result
 
@@ -261,26 +269,12 @@ def calculate_output_clusters(icm_channel, centroids_channel, gamma, number_of_d
 
     return output
 
-def centroid_softmax(centroids_channel):
-    softmax = nn.Softmax(dim=1)
 
-    cr = torch.cat(centroids_channel[0])
-    cg = torch.cat(centroids_channel[1])
-    cb = torch.cat(centroids_channel[2])
-
-    cr = softmax(cr)
-    cg = softmax(cg)
-    cb = softmax(cb)
-    
-    return [cr, cg, cb]
-
-
-def draw_output(icm_channel, centroids_channel, gamma, number_of_dimensions, img, label, size, step):
+def draw_output(icm_channel, centroids_channel, gamma, number_of_dimensions, img, size, step):
     output = calculate_output_clusters(icm_channel, centroids_channel, gamma, number_of_dimensions, img, size, step)
     
     # print(' '.join('%5s' % classes[label]))
-    imshow(torchvision.utils.make_grid(img))
-
+    imshow(torchvision.utils.make_grid(img[0]))
     for i in range(len(output)):
         print(f'Cluster {i}th:')
         # imshow(torchvision.utils.make_grid(output[i][0]))
@@ -289,52 +283,37 @@ def draw_output(icm_channel, centroids_channel, gamma, number_of_dimensions, img
         imshow(torchvision.utils.make_grid(output[i]))
 
 # apply filter --------------------------------------------------------------------------------------
-def calculate_channel_output(img, centroid, icm, gamma, number_of_dimensions, size, step):
 
-    windows = surround_pixel(img, size, step)
-    result = torch.zeros((windows[0].shape[0], windows[0].shape[1]))
-    for i in range(windows[0].shape[0]):
-        for j in range(windows[0].shape[1]):
-            result[i][j] = calculate_membership(icm, centroid, windows[0][i, j], gamma, number_of_dimensions)
+def calculate_channel_output(channel, img, centroid, icm, gamma, number_of_dimensions, size, step):
+
+    result = torch.zeros((img.shape[0], img.shape[1]))
+    for i in range(img.shape[0]):
+        for j in range(img.shape[1]):
+            result[i][j] = calculate_membership(icm, centroid, img[i, j], gamma, number_of_dimensions)
     return result
 
 def calculate_max_channel_output(channel, img, centroids, icm, gamma, number_of_dimensions, size, step):
 
-    max = 0
-    idx = 0
-    for i in range(len(centroids[channel])):
-        res = calculate_channel_output(img, centroids[channel][i], icm[channel][i], gamma, number_of_dimensions, size, step)
-        if(torch.sum(res) >= max):
-            max_matrix = res
-            max = torch.sum(res)
-            idx = i
+    miu_ik = calculate_membership_matrix(img.reshape((img.shape[0]*img.shape[1], number_of_dimensions)) ,centroids[channel], icm[channel], gamma, number_of_dimensions)
+    sum = torch.sum(miu_ik, 0)
+    idx = torch.argmax(sum)
+    max_matrix = calculate_channel_output(channel, img, centroids[channel][idx], icm[channel][idx], gamma, number_of_dimensions, size, step)
     return max_matrix, idx
 
 def calculate_max_output_clusters(img, centroids, icm, gamma, number_of_dimensions, size, step):
+    windows = surround_pixel(img, size, step, number_of_dimensions)
 
-    max_matrix_r, max_r_idx = calculate_max_channel_output(0, img, centroids, icm, gamma, number_of_dimensions, size, step)
-    max_matrix_g, max_g_idx = calculate_max_channel_output(1, img, centroids, icm, gamma, number_of_dimensions, size, step)
-    max_matrix_b, max_b_idx = calculate_max_channel_output(2, img, centroids, icm, gamma, number_of_dimensions, size, step)
+    max_matrix_r, max_r_idx = calculate_max_channel_output(0, windows[0], centroids, icm, gamma, number_of_dimensions, size, step)
+    max_matrix_g, max_g_idx = calculate_max_channel_output(1, windows[1], centroids, icm, gamma, number_of_dimensions, size, step)
+    max_matrix_b, max_b_idx = calculate_max_channel_output(2, windows[2], centroids, icm, gamma, number_of_dimensions, size, step)
     result = torch.stack([max_matrix_r, max_matrix_g, max_matrix_b])
     result = torch.stack([result])
     return result, [max_r_idx, max_g_idx, max_b_idx]
 
-# def get_threshold(matrix, threshold):
-#     idx = [[], [], []]
-
-#     for i in range(matrix.shape[0]):
-#         for j in range(matrix.shape[1]):
-#             for k in range(matrix.shape[2]):
-#                 if matrix[i, j, k] > threshold:
-#                     idx[0].append(i)
-#                     idx[1].append(j)
-#                     idx[2].append(k)
-#     return idx
-    
-
-def centroid_trim(idx_list, counter, centroids, icm):
-    max_idx = np.where(torch.tensor(counter) > 1)
+def centroid_trim(idx_list, counter, centroids, cov, icm):
+    max_idx = np.where(torch.tensor(counter) > 0)
     new_centroids = [[], [], []]
+    new_cov = [[], [], []]
     new_icm = [[], [], []]
     for i in range(max_idx[0].shape[0]):
         new_centroids[0].append(centroids[0][idx_list[int(max_idx[0][i])][0]])
@@ -344,11 +323,15 @@ def centroid_trim(idx_list, counter, centroids, icm):
         new_icm[0].append(icm[0][idx_list[int(max_idx[0][i])][0]])
         new_icm[1].append(icm[1][idx_list[int(max_idx[0][i])][1]])
         new_icm[2].append(icm[2][idx_list[int(max_idx[0][i])][2]])
+        
+        new_cov[0].append(cov[0][idx_list[int(max_idx[0][i])][0]])
+        new_cov[1].append(cov[1][idx_list[int(max_idx[0][i])][1]])
+        new_cov[2].append(cov[2][idx_list[int(max_idx[0][i])][2]])
     
-    return new_centroids, new_icm
-
-def centroid_counter(dataset, centroids, icm, gamma, number_of_dimensions, size, step):
-    idx_list = []
+    return new_centroids, new_cov, new_icm
+ 
+def centroid_counter(dataset, centroids, cov, icm, gamma, number_of_dimensions, size, step):
+    idx_list = [] # keep the idx of the most active centroid
     counter = [] # keep the repetition of each combination of channels
     new_dataset = []
 
@@ -362,53 +345,53 @@ def centroid_counter(dataset, centroids, icm, gamma, number_of_dimensions, size,
             idx_list.append(idx)
             counter.append(1)
     
-    new_centroids, new_icm = centroid_trim(idx_list, counter, centroids, icm)
+    new_centroids, new_icm = centroid_trim(idx_list, counter, centroids, cov, icm)
 
     return new_dataset, new_centroids, new_icm
 
-def next_layer(layer, dataset, labels, p_centroids, icm, iteration, number_of_dimensions, number_of_classes, size, step, gamma, beta):
-    centroids_channel = []
-    icm_channel = []
+def calculate_final_result(icm_channel, centroids_channel, gamma, number_of_dimensions, img, size, step):
     
-    print(f'Layer {layer} started.')
+    output = calculate_output_clusters(icm_channel, centroids_channel, gamma, number_of_dimensions, img, size, step)
 
-    for color_channel in range(3):
-        print(f'color channel {color_channel} started.')
-        dataset_channel = []
-        class_label_matrix = []
-
-        # centroid and cov of each cluster
-        centroids = p_centroids[color_channel]
-        covariances = icm[color_channel] # just in order to have a square matrix
-        inverted_covariances = icm[color_channel]
-
-        print(len(centroids))
-        make_dataset(color_channel, dataset_channel, class_label_matrix, dataset, labels, size, step, number_of_dimensions, number_of_classes)
-        dataset_channel = torch.stack(dataset_channel)
-        dataset_channel = dataset_channel.type(torch.DoubleTensor)
-        class_label_matrix = torch.tensor(class_label_matrix, dtype=torch.float64)
-
-        q = torch.zeros((len(centroids), number_of_classes), dtype=torch.float64) # matrix that contains the probibilities number of clusters x number of classes
-
-        for j in range(iteration):
-            centroids = update_centroids(dataset_channel, class_label_matrix, centroids, inverted_covariances, q, gamma, beta, number_of_dimensions)
-            update_covariances(dataset_channel, class_label_matrix, centroids, covariances, inverted_covariances, q, classes, gamma, beta, number_of_dimensions)
-        
-        centroids_channel.append(centroids)
-        icm_channel.append(inverted_covariances)
-
-        print(f'color channel {color_channel} finished.')
+    optimal_red = output[0][0]
+    optimal_green = output[0][1]
+    optimal_blue = output[0][2]
+    sum = torch.zeros(optimal_red.shape)
     
-    print(f'Layer {layer} finished.')
-    return centroids_channel, icm_channel
+    for i in range(sum.shape[0]):
+        for j in range(sum.shape[1]):
+            counter = 0 
+            if  torch.sum(optimal_red[i-2:i+2, j-2:j+2]) < 0.7:
+                optimal_red[i, j] = 0
+            else:
+                counter += 1
+
+            if  torch.sum(optimal_green[i-2:i+2, j-2:j+2]) < 0.7:
+                optimal_green[i][j] = 0
+            else:
+                counter += 1
+
+            if  torch.sum(optimal_blue[i-2:i+2, j-2:j+2]) < 0.7:
+                optimal_blue[i][j] = 0
+            else:
+                counter += 1
+            if counter > 2:
+                sum[i][j] = 1
+
+    # print("Optimal Sum:")
+    # imshow(torchvision.utils.make_grid(sum))
+    
+    return sum
 
 if __name__ == '__main__':
+    start = timeit.default_timer()
+
     # load data
     trainset = CELEBA_Customized('./dataset/celeba')
     trainloader = DataLoader(dataset=trainset, batch_size=1, shuffle=False)
 
-    classes = ('lefteye', 'righteye', 'nose', 'leftmouth', 'rightmouth', 'none')
-    # classes = ('face')
+    # classes = ('lefteye', 'righteye', 'nose', 'leftmouth', 'rightmouth', 'none')
+    classes = ('lefteye', 'righteye', 'nose', 'leftmouth', 'rightmouth')
 
     # dataset keeps our windows, class_label_matrix keeps the label of windows
     dataset, labels = get_part_of_dataset(trainloader)
@@ -418,7 +401,7 @@ if __name__ == '__main__':
 
     # initialize the centroids and the parameters
     number_of_dimensions = 9
-    number_of_classes = 6
+    number_of_classes = 5
     size = 3 # 3x3 window size
     step = 2 # one layer of overlap
 
@@ -428,82 +411,34 @@ if __name__ == '__main__':
     beta = 1
 
     iteration = 200
-    layer = 2
+    layer = 3
 
-    # all_output = []
-    # centroids_channel, icm_channel = suppervised_fuzzy_clustering(dataset, labels, iteration, number_of_dimensions, number_of_classes, size, step, gamma, sigma, threshold, beta)
 
-    # with open('first_centroids.pkl', 'wb') as f:
-    #    pickle.dump(centroids_channel, f)
-    
-    # with open('first_icm.pkl', 'wb') as f:
-    #     pickle.dump(icm_channel, f)
-
-    # with open('first_centroids.pkl', 'rb') as handle:
-    #     centroids_channel = pickle.load(handle)
-    # with open('first_icm.pkl', 'rb') as handle:
-    #     icm_channel = pickle.load(handle)
-
-    
-    # for l in range(layer):
-    #     dataset, trim_centroids, trim_icm = centroid_counter(dataset, centroids_channel, icm_channel, gamma, number_of_dimensions, 3, 1) # calculate input of this layer
-    #     all_output.append(dataset)
-    #     centroids_channel, icm_channel = next_layer(l, dataset, labels, trim_centroids, trim_icm, iteration, number_of_dimensions, number_of_classes, size, step, gamma, beta)
-    
-    # dataset, trim_centroids, trim_icm = centroid_counter(dataset, centroids_channel, icm_channel, gamma, number_of_dimensions, 3, 1) # calculate input of this layer
-    # all_output.append(dataset)
-
-    # with open('final_centroids.pkl', 'wb') as f:
-    #    pickle.dump(trim_centroids, f)
-    
-    # with open('final_icm.pkl', 'wb') as f:
-    #     pickle.dump(trim_icm, f)
         
-    # for layer in range(len(all_output)):
-    #     print(f'output of layer {layer}')
-    #     for i in range(len(all_output[layer])):
-    #         print(f'Image {i}')
-    #         imshow(torchvision.utils.make_grid(all_output[layer][i]))
 
 
+# <----------------------------------------------------- body of the code --------------------------------------------->
+    dataset = []
+    class_label_matrix = []
 
+    for color_channel in range(3):
+        dataset_channel = []
+        make_dataset(color_channel, dataset_channel, class_label_matrix, dataset, labels, size, step, number_of_dimensions, number_of_classes)
+        dataset_channel = torch.stack(dataset_channel)
+        dataset_channel = dataset_channel.type(torch.DoubleTensor)
+        dataset.append(dataset_channel)
+    class_label_matrix = torch.tensor(class_label_matrix, dtype=torch.float64)
 
-    # with open('centroids.pkl', 'wb') as f:
-    #    pickle.dump(centroids_channel, f)
-    
-    # with open('icm.pkl', 'wb') as handle:
-    #     pickle.dump(icm_channel, handle)
+    # first step of the algorithm
+    centroids = []
+    inverted_covariances = []
+    covariances = []
+    initialize_centroids_channel(dataset, centroids, inverted_covariances, covariances, gamma, sigma, threshold, number_of_dimensions) 
 
-    # for i in range(len(dataset)):
-    #     filter_img = dataset[i]
-    #     filter_label = labels[i]
-    #     print(f'Image {i}th:')
-    #     draw_output(icm_channel, centroids_channel, gamma, number_of_dimensions, filter_img, filter_label, 3, 1) # with label
-    # draw_output(icm_channel, centroids_channel, gamma, number_of_dimensions, img.reshape((1, 3, 218, 178)), labels[0], 3, 1) # with label
+    # iterative steps per layer
+    for i in range(len(layer)):
 
-    # with open('centroids.pkl', 'rb') as handle:
-    #     centroids_channel = pickle.load(handle)
-    # with open('icm.pkl', 'rb') as handle:
-    #     icm_channel = pickle.load(handle)
-
-    with open('first_centroids.pkl', 'rb') as handle:
-        f_centroids_channel = pickle.load(handle)
-    with open('first_icm.pkl', 'rb') as handle:
-        f_icm_channel = pickle.load(handle)
-
-    with open('final_centroids.pkl', 'rb') as handle:
-        centroids_channel = pickle.load(handle)
-    with open('final_icm.pkl', 'rb') as handle:
-        icm_channel = pickle.load(handle)
-
-    img = Image.open("test.jpg")
-    convert_tensor = transforms.ToTensor()
-    img = convert_tensor(img)
-
-    res, idx = calculate_max_output_clusters(img.reshape((1, 3, 218, 178)), f_centroids_channel, f_icm_channel, gamma, number_of_dimensions, 3, 1)
-    res, idx = calculate_max_output_clusters(res, centroids_channel, icm_channel, gamma, number_of_dimensions, 3, 1)
-
-    imshow(torchvision.utils.make_grid(res))
-
+        centroids_channel, cov_channel, icm_channel = supervised_fuzzy_clustering(dataset, labels, centroids, covariances, inverted_covariances, iteration, number_of_dimensions, number_of_classes, size, step, gamma, sigma, threshold, beta)
+        dataset, centroids_channel, cov_channel, icm_channel = centroid_counter(dataset, centroids, cov_channel, icm_channel, gamma, number_of_dimensions, size, step)
 
 
